@@ -21,10 +21,13 @@ import com.google.cloud.tools.jib.http.Authorizations;
 import com.google.cloud.tools.jib.json.JsonTemplateMapper;
 import com.google.cloud.tools.jib.registry.credentials.json.DockerConfigTemplate;
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.collect.ImmutableList;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.LinkedList;
+import java.util.Optional;
 import javax.annotation.Nullable;
 
 /**
@@ -50,6 +53,11 @@ public class DockerConfigCredentialRetriever {
   private static final Path DOCKER_CONFIG_FILE =
       Paths.get(System.getProperty("user.home")).resolve(".docker").resolve("config.json");
 
+  private static final ImmutableList<ImmutableList<String>> REGISTRY_ALIAS_GROUPS = ImmutableList.of(
+          // Docker Hub alias group
+          ImmutableList.of("registry.hub.docker.com", "index.docker.io/v1/")
+      );
+
   private final String registry;
   private final Path dockerConfigFile;
   private final DockerCredentialHelperFactory dockerCredentialHelperFactory;
@@ -62,7 +70,7 @@ public class DockerConfigCredentialRetriever {
   DockerConfigCredentialRetriever(String registry, Path dockerConfigFile) {
     this.registry = registry;
     this.dockerConfigFile = dockerConfigFile;
-    this.dockerCredentialHelperFactory = new DockerCredentialHelperFactory(registry);
+    dockerCredentialHelperFactory = new DockerCredentialHelperFactory(registry);
   }
 
   @VisibleForTesting
@@ -73,6 +81,26 @@ public class DockerConfigCredentialRetriever {
     this.registry = registry;
     this.dockerConfigFile = dockerConfigFile;
     this.dockerCredentialHelperFactory = dockerCredentialHelperFactory;
+  }
+
+  @VisibleForTesting
+  static ImmutableList<String> getAllRegistryAliases(String registry) {
+    Optional<ImmutableList<String>> registryGroup =
+        REGISTRY_ALIAS_GROUPS.stream().filter(aliasGroup -> hasRegistry(aliasGroup, registry)).findAny();
+    if (!registryGroup.isPresent()) {
+      // No known aliases for the given registry. Just try the registry alone.
+      return ImmutableList.of(registry);
+    }
+
+    LinkedList<String> registryAliases = new LinkedList<>(registryGroup.get());
+    registryAliases.remove(registry);
+    registryAliases.addFirst(registry);
+    return ImmutableList.copyOf(registryAliases);
+  }
+
+  @VisibleForTesting
+  static boolean hasRegistry(ImmutableList<String> registries, String registry) {
+    return registries.stream().anyMatch(registry::equals);
   }
 
   /**
@@ -86,6 +114,16 @@ public class DockerConfigCredentialRetriever {
       return null;
     }
 
+    for (String registry : getAllRegistryAliases(registry)) {
+      Authorization authorization = retrieve(dockerConfigTemplate, registry);
+      if (authorization != null) {
+        return authorization;
+      }
+    }
+    return null;
+  }
+
+  private Authorization retrieve(DockerConfigTemplate dockerConfigTemplate, String registry) throws IOException {
     // First, tries to find defined auth.
     String auth = dockerConfigTemplate.getAuthFor(registry);
     if (auth != null) {
