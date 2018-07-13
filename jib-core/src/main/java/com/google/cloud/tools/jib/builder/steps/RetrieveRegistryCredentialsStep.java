@@ -22,16 +22,19 @@ import com.google.cloud.tools.jib.builder.BuildConfiguration;
 import com.google.cloud.tools.jib.builder.BuildLogger;
 import com.google.cloud.tools.jib.http.Authorization;
 import com.google.cloud.tools.jib.registry.credentials.DockerConfigCredentialRetriever;
-import com.google.cloud.tools.jib.registry.credentials.DockerCredentialHelperFactory;
+import com.google.cloud.tools.jib.registry.credentials.DockerCredentialHelper;
 import com.google.cloud.tools.jib.registry.credentials.NonexistentDockerCredentialHelperException;
 import com.google.cloud.tools.jib.registry.credentials.NonexistentServerUrlDockerCredentialHelperException;
 import com.google.cloud.tools.jib.registry.credentials.RegistryCredentials;
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.ListeningExecutorService;
 import java.io.IOException;
 import java.util.concurrent.Callable;
+import java.util.function.BiFunction;
+import java.util.function.Function;
 import javax.annotation.Nullable;
 
 /** Attempts to retrieve registry credentials. */
@@ -45,6 +48,9 @@ class RetrieveRegistryCredentialsStep implements AsyncStep<Authorization>, Calla
    */
   private static final ImmutableMap<String, String> COMMON_CREDENTIAL_HELPERS =
       ImmutableMap.of("gcr.io", "gcr", "amazonaws.com", "ecr-login");
+
+  private static final ImmutableList<String> DOCKER_HUB_REGISTRIES =
+      ImmutableList.of("registry.hub.docker.com", "index.docker.io");
 
   /** Retrieves credentials for the base image. */
   static RetrieveRegistryCredentialsStep forBaseImage(
@@ -72,8 +78,8 @@ class RetrieveRegistryCredentialsStep implements AsyncStep<Authorization>, Calla
   private final String registry;
   @Nullable private final String credentialHelperSuffix;
   @Nullable private final RegistryCredentials knownRegistryCredentials;
-  private final DockerCredentialHelperFactory dockerCredentialHelperFactory;
-  private final DockerConfigCredentialRetriever dockerConfigCredentialRetriever;
+  private final BiFunction<String, String, DockerCredentialHelper> dockerCredentialHelperFactory;
+  private final Function<String, DockerConfigCredentialRetriever> dockerConfigCredentialRetrieverFactory;
 
   private final ListenableFuture<Authorization> listenableFuture;
 
@@ -84,14 +90,14 @@ class RetrieveRegistryCredentialsStep implements AsyncStep<Authorization>, Calla
       String registry,
       @Nullable String credentialHelperSuffix,
       @Nullable RegistryCredentials knownRegistryCredentials,
-      DockerCredentialHelperFactory dockerCredentialHelperFactory,
-      DockerConfigCredentialRetriever dockerConfigCredentialRetriever) {
+      BiFunction<String, String, DockerCredentialHelper> dockerCredentialHelperFactory,
+      Function<String, DockerConfigCredentialRetriever> dockerConfigCredentialRetrieverFactory) {
     this.buildLogger = buildLogger;
     this.registry = registry;
     this.credentialHelperSuffix = credentialHelperSuffix;
     this.knownRegistryCredentials = knownRegistryCredentials;
     this.dockerCredentialHelperFactory = dockerCredentialHelperFactory;
-    this.dockerConfigCredentialRetriever = dockerConfigCredentialRetriever;
+    this.dockerConfigCredentialRetrieverFactory = dockerConfigCredentialRetrieverFactory;
 
     listenableFuture = listeningExecutorService.submit(this);
   }
@@ -109,8 +115,8 @@ class RetrieveRegistryCredentialsStep implements AsyncStep<Authorization>, Calla
         registry,
         credentialHelperSuffix,
         knownRegistryCredentials,
-        new DockerCredentialHelperFactory(registry),
-        new DockerConfigCredentialRetriever(registry));
+        DockerCredentialHelper::new,
+        DockerConfigCredentialRetriever::new);
   }
 
   @Override
@@ -121,6 +127,17 @@ class RetrieveRegistryCredentialsStep implements AsyncStep<Authorization>, Calla
   @Override
   @Nullable
   public Authorization call() throws IOException, NonexistentDockerCredentialHelperException {
+    Authorization authorization = getAuthorization(registry);
+
+    if (authorization == null && isDockerHubRegistry(registry)) {
+      buildLogger.info("Registry is Docker Hub. Checking if credentials for other Docker Hub alises are configured.");
+      return findOtherDockerHubCredential(registry);
+    }
+    return authorization;
+  }
+
+  private Authorization getAuthorization(String registry)
+      throws IOException, NonexistentDockerCredentialHelperException {
     buildLogger.lifecycle(String.format(DESCRIPTION, registry) + "...");
 
     try (Timer ignored = new Timer(buildLogger, String.format(DESCRIPTION, registry))) {
@@ -163,7 +180,7 @@ class RetrieveRegistryCredentialsStep implements AsyncStep<Authorization>, Calla
 
       // Tries to get registry credentials from the Docker config.
       try {
-        Authorization dockerConfigAuthorization = dockerConfigCredentialRetriever.retrieve();
+        Authorization dockerConfigAuthorization = dockerConfigCredentialRetrieverFactory.apply(registry).retrieve();
         if (dockerConfigAuthorization != null) {
           buildLogger.info("Using credentials from Docker config for " + registry);
           return dockerConfigAuthorization;
@@ -178,8 +195,28 @@ class RetrieveRegistryCredentialsStep implements AsyncStep<Authorization>, Calla
        * public and does not need extra credentials) and return null.
        */
       buildLogger.info("No credentials could be retrieved for registry " + registry);
+
       return null;
     }
+  }
+
+  @VisibleForTesting
+  static boolean isDockerHubRegistry(String registry) {
+    return DOCKER_HUB_REGISTRIES.stream().anyMatch(registry::equals);
+  }
+
+  @VisibleForTesting
+  Authorization findOtherDockerHubCredential(String dockerHubRegistry)
+      throws IOException, NonexistentDockerCredentialHelperException {
+    for (String otherRegistry : DOCKER_HUB_REGISTRIES) {
+      if (!otherRegistry.equals(dockerHubRegistry)) {
+        Authorization authorization = getAuthorization(otherRegistry);
+        if (authorization != null) {
+          return authorization;
+        }
+      }
+    }
+    return null;
   }
 
   /**
@@ -194,9 +231,7 @@ class RetrieveRegistryCredentialsStep implements AsyncStep<Authorization>, Calla
 
     try {
       Authorization authorization =
-          dockerCredentialHelperFactory
-              .withCredentialHelperSuffix(credentialHelperSuffix)
-              .retrieve();
+          dockerCredentialHelperFactory.apply(registry, credentialHelperSuffix).retrieve();
       logGotCredentialsFrom("docker-credential-" + credentialHelperSuffix);
       return authorization;
 

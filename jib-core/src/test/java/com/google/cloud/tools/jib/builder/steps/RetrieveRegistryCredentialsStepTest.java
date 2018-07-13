@@ -21,12 +21,12 @@ import com.google.cloud.tools.jib.builder.BuildLogger;
 import com.google.cloud.tools.jib.http.Authorization;
 import com.google.cloud.tools.jib.registry.credentials.DockerConfigCredentialRetriever;
 import com.google.cloud.tools.jib.registry.credentials.DockerCredentialHelper;
-import com.google.cloud.tools.jib.registry.credentials.DockerCredentialHelperFactory;
 import com.google.cloud.tools.jib.registry.credentials.NonexistentDockerCredentialHelperException;
 import com.google.cloud.tools.jib.registry.credentials.NonexistentServerUrlDockerCredentialHelperException;
 import com.google.cloud.tools.jib.registry.credentials.RegistryCredentials;
 import com.google.common.util.concurrent.ListeningExecutorService;
 import java.io.IOException;
+import java.util.function.BiFunction;
 import javax.annotation.Nullable;
 import org.junit.Assert;
 import org.junit.Before;
@@ -46,7 +46,7 @@ public class RetrieveRegistryCredentialsStepTest {
   @Mock private BuildConfiguration mockBuildConfiguration;
   @Mock private BuildLogger mockBuildLogger;
 
-  @Mock private DockerCredentialHelperFactory mockDockerCredentialHelperFactory;
+  @Mock private BiFunction<String, String, DockerCredentialHelper> mockDockerCredentialHelperFactory;
   @Mock private DockerCredentialHelper mockDockerCredentialHelper;
   /**
    * A {@link DockerCredentialHelper} that throws {@link
@@ -84,9 +84,7 @@ public class RetrieveRegistryCredentialsStepTest {
   @Test
   public void testCall_useCredentialHelper()
       throws IOException, NonexistentDockerCredentialHelperException {
-    Mockito.when(
-            mockDockerCredentialHelperFactory.withCredentialHelperSuffix(
-                "someOtherCredentialHelper"))
+    Mockito.when(mockDockerCredentialHelperFactory.apply(FAKE_TARGET_REGISTRY, "someOtherCredentialHelper"))
         .thenReturn(mockDockerCredentialHelper);
 
     Assert.assertEquals(
@@ -116,8 +114,7 @@ public class RetrieveRegistryCredentialsStepTest {
   public void testCall_useDockerConfig()
       throws IOException, NonexistentDockerCredentialHelperException {
     // Credential helper does not have credentials.
-    Mockito.when(
-            mockDockerCredentialHelperFactory.withCredentialHelperSuffix("someCredentialHelper"))
+    Mockito.when(mockDockerCredentialHelperFactory.apply(FAKE_TARGET_REGISTRY, "someCredentialHelper"))
         .thenReturn(mockNonexistentServerUrlDockerCredentialHelper);
 
     Mockito.when(mockDockerConfigCredentialRetriever.retrieve()).thenReturn(mockAuthorization);
@@ -134,9 +131,9 @@ public class RetrieveRegistryCredentialsStepTest {
   @Test
   public void testCall_inferCommonCredentialHelpers()
       throws IOException, NonexistentDockerCredentialHelperException {
-    Mockito.when(mockDockerCredentialHelperFactory.withCredentialHelperSuffix("gcr"))
+    Mockito.when(mockDockerCredentialHelperFactory.apply("something.gcr.io", "gcr"))
         .thenReturn(mockDockerCredentialHelper);
-    Mockito.when(mockDockerCredentialHelperFactory.withCredentialHelperSuffix("ecr-login"))
+    Mockito.when(mockDockerCredentialHelperFactory.apply("something.amazonaws.com", "ecr-login"))
         .thenReturn(mockNonexistentDockerCredentialHelper);
 
     Assert.assertEquals(
@@ -148,6 +145,21 @@ public class RetrieveRegistryCredentialsStepTest {
     Assert.assertEquals(
         null, makeRetrieveRegistryCredentialsStep("something.amazonaws.com", null, null).call());
     Mockito.verify(mockBuildLogger).warn("warning");
+  }
+
+  @Test
+  public void testIsDockerHubRegistry_registryHubDockerCom() {
+    Assert.assertTrue(RetrieveRegistryCredentialsStep.isDockerHubRegistry("registry.hub.docker.com"));
+  }
+
+  @Test
+  public void testIsDockerHubRegistry_indexDockerIo() {
+    Assert.assertTrue(RetrieveRegistryCredentialsStep.isDockerHubRegistry("index.docker.io"));
+  }
+
+  @Test
+  public void testIsDockerHubRegistry_nonDockerHub() {
+    Assert.assertFalse(RetrieveRegistryCredentialsStep.isDockerHubRegistry("something.gcr.io"));
   }
 
   /** Creates a fake {@link RetrieveRegistryCredentialsStep} for {@code registry}. */
@@ -164,6 +176,6 @@ public class RetrieveRegistryCredentialsStepTest {
         credentialHelperSuffix,
         knownRegistryCredentials,
         mockDockerCredentialHelperFactory,
-        mockDockerConfigCredentialRetriever);
+        ignored -> mockDockerConfigCredentialRetriever);
   }
 }
